@@ -58,6 +58,8 @@ function parseIntSafe(val, defaultVal = 60000, min = 5000) {
 
 export const config = {
   discordWebhookUrl: (process.env.DISCORD_WEBHOOK_URL || '').trim(),
+  discordBotToken: (process.env.DISCORD_BOT_TOKEN || '').trim(),
+  discordChannelId: (process.env.DISCORD_CHANNEL_ID || '').trim(),
   pollInterval: parseIntSafe(process.env.FUNPAY_POLL_INTERVAL, 60000, 5000),
   startupMessage: parseBool(process.env.STARTUP_MESSAGE, true),
   logLevel: (process.env.LOG_LEVEL || 'info').trim().toLowerCase(),

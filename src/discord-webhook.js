@@ -1,6 +1,7 @@
 import { config, maskWebhookUrl } from './config.js';
 import { logger } from './logger.js';
 import { truncate, sleep } from './utils.js';
+import { sendChannelMessage } from './discord-bot.js';
 
 const COLOR_RUST_ORANGE = 0xCE422B;
 const COLOR_DLC_GOLD = 0xFFD700;
@@ -91,7 +92,7 @@ export function buildOfferPayload(offer) {
     },
     {
       name: '🔗 Link',
-      value: `[View on FunPay](${offer.url})`,
+      value: `[View Offer on FunPay](${offer.url})`,
       inline: false
     }
   ];
@@ -128,32 +129,55 @@ export function buildOfferPayload(offer) {
 }
 
 /**
- * Sends a notification for a newly detected offer.
- * @param {string} webhookUrl 
- * @param {object} offer 
+ * Dispatches a notification via Discord Bot Token or Webhook.
+ * @param {object} payload 
  * @returns {Promise<boolean>}
  */
-export async function sendOfferNotification(webhookUrl, offer) {
+export async function dispatchDiscordNotification(payload) {
+  // If Bot Token and Channel ID are configured, send via Discord REST API
+  if (config.discordBotToken && config.discordChannelId) {
+    return await sendChannelMessage(config.discordBotToken, config.discordChannelId, payload);
+  }
+
+  // Fallback to Webhook URL
+  if (config.discordWebhookUrl) {
+    return await sendWebhookPayload(config.discordWebhookUrl, payload);
+  }
+
+  logger.warn('No Discord notification destination configured (neither Bot Token nor Webhook).');
+  return false;
+}
+
+/**
+ * Sends a notification for a newly detected offer.
+ * @param {object} offer 
+ * @param {string} [webhookUrl] 
+ * @returns {Promise<boolean>}
+ */
+export async function sendOfferNotification(offer, webhookUrl = config.discordWebhookUrl) {
   const payload = buildOfferPayload(offer);
-  return await sendWebhookPayload(webhookUrl, payload);
+  if (webhookUrl && (!config.discordBotToken || !config.discordChannelId)) {
+    return await sendWebhookPayload(webhookUrl, payload);
+  }
+  return await dispatchDiscordNotification(payload);
 }
 
 /**
  * Sends the bot startup message to Discord.
- * @param {string} webhookUrl 
  * @param {{ total: number, kept: number }} stats 
+ * @param {string} [webhookUrl] 
  * @returns {Promise<boolean>}
  */
-export async function sendStartupNotification(webhookUrl, stats = { total: 0, kept: 0 }) {
+export async function sendStartupNotification(stats = { total: 0, kept: 0 }, webhookUrl = config.discordWebhookUrl) {
   const embed = {
     title: '🤖 NexoBot Started',
     description: 
-      `Monitoring FunPay Rust Offers for new account listings.\n\n` +
-      `Found **${stats.total}** existing offers — watching for new ones.\n\n` +
-      `**Filtre active:**\n` +
-      `• Rental/service offers excluded\n` +
-      `• Zero-hours offers excluded\n` +
-      `• DLC offers flagged`,
+      `Monitoring FunPay Rust Offers for new account listings.\n` +
+      `Found **${stats.total}** existing account offers — watching for new ones.\n\n` +
+      `**Filters active:**\n` +
+      `• ❌ Rental / service offers excluded\n` +
+      `• ❌ Accounts with 0 hours excluded\n` +
+      `• ‼️ DLC accounts flagged with urgent alert`,
     color: COLOR_STARTUP_GREEN,
     footer: {
       text: 'FunPay • Rust Accounts Bot'
@@ -166,5 +190,8 @@ export async function sendStartupNotification(webhookUrl, stats = { total: 0, ke
     embeds: [embed]
   };
 
-  return await sendWebhookPayload(webhookUrl, payload);
+  if (webhookUrl && (!config.discordBotToken || !config.discordChannelId)) {
+    return await sendWebhookPayload(webhookUrl, payload);
+  }
+  return await dispatchDiscordNotification(payload);
 }

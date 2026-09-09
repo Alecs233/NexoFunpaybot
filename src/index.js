@@ -5,6 +5,7 @@ import { fetchFunPayOffers } from './funpay-scraper.js';
 import { filterOffer, sleep } from './utils.js';
 import { stateStore } from './state-store.js';
 import { sendOfferNotification, sendStartupNotification } from './discord-webhook.js';
+import { startDiscordGateway, stopDiscordGateway } from './discord-bot.js';
 
 let isPolling = false;
 let pollTimer = null;
@@ -97,9 +98,9 @@ async function runPollCycle(isInitialSeed = false) {
       await stateStore.addSeen(allIds);
       logger.info(`Initial seed finished: ${allIds.length} existing offers recorded in state (no Discord spam sent).`);
 
-      if (config.startupMessage && config.discordWebhookUrl) {
+      if (config.startupMessage && (config.discordWebhookUrl || config.discordBotToken)) {
         logger.info('Sending startup message to Discord...');
-        await sendStartupNotification(config.discordWebhookUrl, {
+        await sendStartupNotification({
           total: totalCount,
           kept: keptOffers.length
         });
@@ -117,7 +118,7 @@ async function runPollCycle(isInitialSeed = false) {
       for (const offer of newOffers) {
         logger.info(`Sending Discord notification for offer #${offer.id}: "${offer.title}" (${offer.price}) [DLC: ${offer.hasDLC ? 'YES' : 'NO'}]`);
         
-        await sendOfferNotification(config.discordWebhookUrl, offer);
+        await sendOfferNotification(offer);
         await stateStore.addSeen(offer.id);
 
         // Rate-limiting delay between consecutive webhooks
@@ -160,12 +161,21 @@ export async function main() {
   logger.info('NexoBot is starting up...');
   logger.info(`Configuration loaded -> Poll Interval: ${config.pollInterval}ms | Startup Message: ${config.startupMessage} | Log Level: ${config.logLevel}`);
 
-  // Validate webhook URL presence
-  if (!config.discordWebhookUrl) {
-    logger.error('CRITICAL ERROR: DISCORD_WEBHOOK_URL is missing or empty in .env!');
-    logger.error('Please configure your DISCORD_WEBHOOK_URL in .env before running NexoBot.');
+  // Validate notification configuration
+  if (!config.discordWebhookUrl && !config.discordBotToken) {
+    logger.error('CRITICAL ERROR: Neither DISCORD_WEBHOOK_URL nor DISCORD_BOT_TOKEN is set!');
+    logger.error('Please configure DISCORD_BOT_TOKEN (with DISCORD_CHANNEL_ID) or DISCORD_WEBHOOK_URL in .env.');
   } else {
-    logger.info(`Discord Webhook configured: ${maskWebhookUrl(config.discordWebhookUrl)}`);
+    if (config.discordBotToken) {
+      logger.info('Discord Bot Token configured. Starting Discord Gateway client...');
+      startDiscordGateway(config.discordBotToken);
+      if (config.discordChannelId) {
+        logger.info(`Target Discord Channel ID: ${config.discordChannelId}`);
+      }
+    }
+    if (config.discordWebhookUrl) {
+      logger.info(`Discord Webhook configured: ${maskWebhookUrl(config.discordWebhookUrl)}`);
+    }
   }
 
   // Initialize persistence store
@@ -197,6 +207,7 @@ function handleShutdown(signal) {
   if (healthServer) {
     healthServer.close();
   }
+  stopDiscordGateway();
   process.exit(0);
 }
 
