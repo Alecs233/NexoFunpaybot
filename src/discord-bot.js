@@ -127,7 +127,7 @@ export function startDiscordGateway(token) {
               registerSlashCommands(token, botUser.id);
             }
 
-            // 1. Slash command /accounts
+            // Slash command /accounts
             if (t === 'INTERACTION_CREATE') {
               if (d.data && d.data.name === 'accounts') {
                 const channelId = d.channel_id;
@@ -146,20 +146,6 @@ export function startDiscordGateway(token) {
                     })
                   });
                 } catch (e) {}
-              }
-            }
-
-            // 2. Chat command: merge si daca scrii !accounts sau /accounts in chat
-            if (t === 'MESSAGE_CREATE') {
-              const content = (d.content || '').trim().toLowerCase();
-              if (content === '!accounts' || content === '/accounts') {
-                const channelId = d.channel_id;
-                addDynamicChannel(channelId);
-                logger.info(`Canal adaugat prin mesaj text: ${channelId}`);
-
-                sendChannelMessage(token, channelId, {
-                  content: '✅ **NexoBot activat pe acest canal!** Toate ofertele FunPay Rust vor fi trimise automat aici.'
-                });
               }
             }
           }
@@ -198,7 +184,7 @@ export function startDiscordGateway(token) {
         op: 2,
         d: {
           token: botToken.startsWith('Bot ') ? botToken.slice(4) : botToken,
-          intents: 33281, // GUILDS + GUILD_MESSAGES + MESSAGE_CONTENT
+          intents: 513, // GUILDS (1) + GUILD_MESSAGES (512) - FĂRĂ permisiuni blocate de Discord!
           properties: { os: 'linux', browser: 'NexoBot', device: 'NexoBot' },
           presence: {
             activities: [{ name: 'FunPay Rust Offers', type: 3 }],
@@ -216,36 +202,3 @@ export function startDiscordGateway(token) {
 /**
  * Sends a message to a Discord channel
  */
-export async function sendChannelMessage(token, channelId, payload, attempt = 1) {
-  if (!token || !channelId) return false;
-
-  const authHeader = token.startsWith('Bot ') ? token : `Bot ${token}`;
-  const url = `${DISCORD_API_BASE}/channels/${channelId}/messages`;
-
-  try {
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Authorization': authHeader,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify(payload)
-    });
-
-    if (response.status === 429) {
-      await sleep(2000);
-      if (attempt < 3) return await sendChannelMessage(token, channelId, payload, attempt + 1);
-      return false;
-    }
-
-    return response.ok;
-  } catch (err) {
-    return false;
-  }
-}
-
-export function stopDiscordGateway() {
-  shouldReconnect = false;
-  if (heartbeatTimer) clearInterval(heartbeatTimer);
-  if (gatewayWs) gatewayWs.close(1000, 'Shutting down');
-}
