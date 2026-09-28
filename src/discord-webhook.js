@@ -4,20 +4,23 @@ import { truncate, sleep } from './utils.js';
 import { sendChannelMessage } from './discord-bot.js';
 
 const COLOR_RUST_ORANGE = 0xCE422B;
-const COLOR_DLC_GOLD = 0xFFD700;
 const COLOR_STARTUP_GREEN = 0x57F287;
 const BOT_NAME = 'NexoBot';
 
 /**
+ * Pune aici ID-urile canalelor unde vrei să ajungă ofertele.
+ * (Poți adăuga oricâte canale vrei, separate prin virgulă).
+ */
+const EXTRA_CHANNELS = [
+  // Lipește ID-ul canalului de pe al doilea server între ghilimele:
+  'PUNE_AICI_ID_CANAL_SECUNDAR'
+];
+
+/**
  * Sends a raw payload to the Discord Webhook URL with rate-limit and retry handling.
- * @param {string} webhookUrl 
- * @param {object} payload 
- * @param {number} [attempt=1] 
- * @returns {Promise<boolean>}
  */
 export async function sendWebhookPayload(webhookUrl, payload, attempt = 1) {
   if (!webhookUrl || typeof webhookUrl !== 'string' || !webhookUrl.startsWith('http')) {
-    logger.warn('Discord webhook URL is invalid or not configured. Notification skipped.');
     return false;
   }
 
@@ -32,26 +35,23 @@ export async function sendWebhookPayload(webhookUrl, payload, attempt = 1) {
       body: JSON.stringify(payload)
     });
 
-    // Handle Discord HTTP 429 Rate Limit
     if (response.status === 429) {
       const retryAfterHeader = response.headers.get('retry-after');
       const retryAfterSec = retryAfterHeader ? parseFloat(retryAfterHeader) : 2;
       const waitMs = Math.ceil(retryAfterSec * 1000) + 200;
 
-      logger.warn(`Discord rate limit encountered (HTTP 429). Retrying after ${waitMs}ms (Attempt ${attempt}/${maxAttempts})...`);
+      logger.warn(`Discord rate limit (HTTP 429). Retrying after ${waitMs}ms...`);
       await sleep(waitMs);
 
       if (attempt < maxAttempts) {
         return await sendWebhookPayload(webhookUrl, payload, attempt + 1);
-      } else {
-        logger.error('Exceeded maximum retry attempts for Discord webhook due to rate limits.');
-        return false;
       }
+      return false;
     }
 
     if (!response.ok) {
       const errText = await response.text();
-      logger.error(`Discord webhook failed with HTTP ${response.status} (${response.statusText}): ${errText}`);
+      logger.error(`Discord webhook error ${response.status}: ${errText}`);
       return false;
     }
 
@@ -63,16 +63,11 @@ export async function sendWebhookPayload(webhookUrl, payload, attempt = 1) {
 }
 
 /**
- * Builds the Discord embed and payload for a FunPay offer.
- * @param {object} offer 
- * @returns {object}
+ * Builds the standard Discord embed and payload for a FunPay offer (fără alerte speciale DLC).
  */
 export function buildOfferPayload(offer) {
-  const isDlc = Boolean(offer.hasDLC);
   const rawTitle = offer.title || 'Rust Account';
-  const prefix = isDlc ? '‼️ DLC DETECTED — ' : '';
-  const maxTitleLen = 256 - prefix.length;
-  const embedTitle = prefix + truncate(rawTitle, maxTitleLen);
+  const embedTitle = truncate(rawTitle, 256);
 
   const fields = [
     {
@@ -87,7 +82,7 @@ export function buildOfferPayload(offer) {
     },
     {
       name: '🟢 Status',
-      value: offer.isOnline ? '🟢 Seller Online' : '🔴 Seller Offline',
+      value: offer.isOnline ? '🟢 Seller Online' : '⚪ Seller Offline',
       inline: true
     },
     {
@@ -97,18 +92,10 @@ export function buildOfferPayload(offer) {
     }
   ];
 
-  if (isDlc) {
-    fields.push({
-      name: '‼️ URGENT — DLC Content',
-      value: 'This account may include DLC / skins / packs. Check immediately!',
-      inline: false
-    });
-  }
-
   const embed = {
     title: embedTitle,
     url: offer.url,
-    color: isDlc ? COLOR_DLC_GOLD : COLOR_RUST_ORANGE,
+    color: COLOR_RUST_ORANGE,
     fields,
     footer: {
       text: 'FunPay • Rust Accounts Bot'
@@ -116,68 +103,73 @@ export function buildOfferPayload(offer) {
     timestamp: new Date().toISOString()
   };
 
-  const payload = {
+  return {
     username: BOT_NAME,
     embeds: [embed]
   };
-
-  if (isDlc) {
-    payload.content = '‼️ **DLC ACCOUNT — CHECK NOW!**';
-  }
-
-  return payload;
 }
 
 /**
- * Dispatches a notification via Discord Bot Token or Webhook.
- * @param {object} payload 
- * @returns {Promise<boolean>}
+ * Dispatches a notification to ALL configured Discord channels and webhooks.
  */
 export async function dispatchDiscordNotification(payload) {
-  // If Bot Token and Channel ID are configured, send via Discord REST API
-  if (config.discordBotToken && config.discordChannelId) {
-    return await sendChannelMessage(config.discordBotToken, config.discordChannelId, payload);
+  let sentAny = false;
+
+  // Unim canalul principal din config cu canalele secundare
+  const allChannels = [
+    config.discordChannelId,
+    ...EXTRA_CHANNELS
+  ]
+    .flatMap(id => (id ? String(id).split(',') : []))
+    .map(id => id.trim())
+    .filter(id => id && id !== 'PUNE_AICI_ID_CANAL_SECUNDAR');
+
+  // Trimitem pe fiecare canal prin Bot Token
+  if (config.discordBotToken && allChannels.length > 0) {
+    for (const channelId of allChannels) {
+      try {
+        const ok = await sendChannelMessage(config.discordBotToken, channelId, payload);
+        if (ok) sentAny = true;
+      } catch (err) {
+        logger.error(`Eroare la trimitere pe canalul ${channelId}:`, err.message);
+      }
+      await sleep(250); // Mică pauză între canale ca să respectăm rate limit-ul
+    }
   }
 
-  // Fallback to Webhook URL
+  // Trimitem și pe Webhook dacă este configurat
   if (config.discordWebhookUrl) {
-    return await sendWebhookPayload(config.discordWebhookUrl, payload);
+    const webhooks = config.discordWebhookUrl.split(',').map(u => u.trim()).filter(Boolean);
+    for (const webhook of webhooks) {
+      const ok = await sendWebhookPayload(webhook, payload);
+      if (ok) sentAny = true;
+      await sleep(250);
+    }
   }
 
-  logger.warn('No Discord notification destination configured (neither Bot Token nor Webhook).');
-  return false;
+  return sentAny;
 }
 
 /**
  * Sends a notification for a newly detected offer.
- * @param {object} offer 
- * @param {string} [webhookUrl] 
- * @returns {Promise<boolean>}
  */
-export async function sendOfferNotification(offer, webhookUrl = config.discordWebhookUrl) {
+export async function sendOfferNotification(offer) {
   const payload = buildOfferPayload(offer);
-  if (webhookUrl && (!config.discordBotToken || !config.discordChannelId)) {
-    return await sendWebhookPayload(webhookUrl, payload);
-  }
   return await dispatchDiscordNotification(payload);
 }
 
 /**
  * Sends the bot startup message to Discord.
- * @param {{ total: number, kept: number }} stats 
- * @param {string} [webhookUrl] 
- * @returns {Promise<boolean>}
  */
-export async function sendStartupNotification(stats = { total: 0, kept: 0 }, webhookUrl = config.discordWebhookUrl) {
+export async function sendStartupNotification(stats = { total: 0, kept: 0 }) {
   const embed = {
-    title: '🤖 NexoBot Started',
+    title: '🚀 NexoBot Started',
     description: 
       `Monitoring FunPay Rust Offers for new account listings.\n` +
-      `Found **${stats.total}** existing account offers — watching for new ones.\n\n` +
+      `Found **${stats.total}** existing account offers - watching for new ones.\n\n` +
       `**Filters active:**\n` +
-      `• ❌ Rental / service offers excluded\n` +
-      `• ❌ Accounts with 0 hours excluded\n` +
-      `• ‼️ DLC accounts flagged with urgent alert`,
+      `  • Rental / service offers excluded\n` +
+      `  • Accounts with 0 hours excluded`,
     color: COLOR_STARTUP_GREEN,
     footer: {
       text: 'FunPay • Rust Accounts Bot'
@@ -190,8 +182,5 @@ export async function sendStartupNotification(stats = { total: 0, kept: 0 }, web
     embeds: [embed]
   };
 
-  if (webhookUrl && (!config.discordBotToken || !config.discordChannelId)) {
-    return await sendWebhookPayload(webhookUrl, payload);
-  }
   return await dispatchDiscordNotification(payload);
 }
