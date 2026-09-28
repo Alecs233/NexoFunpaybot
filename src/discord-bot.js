@@ -23,15 +23,25 @@ function initDynamicChannels() {
 }
 initDynamicChannels();
 
-export function addDynamicChannel(channelId) {
-  if (!channelId) return false;
-  const str = String(channelId).trim();
-  dynamicChannels.add(str);
+function saveChannelsToDisk() {
   try {
     const dir = path.dirname(CHANNELS_FILE);
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(CHANNELS_FILE, JSON.stringify([...dynamicChannels], null, 2), 'utf8');
   } catch (e) {}
+}
+
+export function addDynamicChannel(channelId) {
+  if (!channelId) return false;
+  dynamicChannels.add(String(channelId).trim());
+  saveChannelsToDisk();
+  return true;
+}
+
+export function removeDynamicChannel(channelId) {
+  if (!channelId) return false;
+  dynamicChannels.delete(String(channelId).trim());
+  saveChannelsToDisk();
   return true;
 }
 
@@ -44,60 +54,93 @@ let heartbeatTimer = null;
 let lastSequence = null;
 let isConnected = false;
 let shouldReconnect = true;
+let botUserId = null;
 
 const DISCORD_API_BASE = 'https://discord.com/api/v10';
 const GATEWAY_URL = 'wss://gateway.discord.gg/?v=10&encoding=json';
 
+/**
+ * Trimiterea panoului cu butoane Start / Stop
+ */
+export async function sendControlPanel(token, channelId) {
+  const payload = {
+    content: '🎮 **NexoBot — Configurare Oferte FunPay Rust**\nApasă pe butonul de mai jos pentru a activa trimiterea ofertelor pe acest canal:',
+    components: [
+      {
+        type: 1, // Action Row
+        components: [
+          {
+            type: 2, // Button
+            style: 3, // Success (Green)
+            label: '▶️ Start Oferte Rust',
+            custom_id: 'start_offers'
+          },
+          {
+            type: 2, // Button
+            style: 4, // Danger (Red)
+            label: '⏹️ Stop Oferte',
+            custom_id: 'stop_offers'
+          }
+        ]
+      }
+    ]
+  };
+
+  return await sendChannelMessage(token, channelId, payload);
+}
+
+/**
+ * Înregistrează comenzile slash /accounts și /start cu Discord API
+ */
 async function registerSlashCommands(token, applicationId) {
   try {
     const authHeader = token.startsWith('Bot ') ? token : `Bot ${token}`;
     const url = `${DISCORD_API_BASE}/applications/${applicationId}/commands`;
-    const res = await fetch(url, {
+    
+    // Înregistrăm comanda /start
+    await fetch(url, {
       method: 'POST',
-      headers: {
-        'Authorization': authHeader,
-        'Content-Type': 'application/json'
-      },
+      headers: { 'Authorization': authHeader, 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        name: 'accounts',
-        description: 'Seteaza acest canal pentru a primi toate ofertele FunPay Rust',
+        name: 'start',
+        description: 'Trimite panoul cu butonul de Start pentru oferte FunPay Rust',
         type: 1
       })
     });
-    if (res.ok) {
-      logger.info('Slash command /accounts registered with Discord successfully.');
-    }
-  } catch (err) {
-    logger.warn(`Could not register slash command: ${err.message}`);
-  }
+
+    // Înregistrăm comanda /accounts
+    await fetch(url, {
+      method: 'POST',
+      headers: { 'Authorization': authHeader, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: 'accounts',
+        description: 'Activeaza trimiterea ofertelor FunPay Rust pe acest canal',
+        type: 1
+      })
+    });
+
+    logger.info('Comenzile slash au fost inregistrate cu succes.');
+  } catch (err) {}
 }
 
 export function startDiscordGateway(token) {
   if (!token) return;
-  if (typeof globalThis.WebSocket === 'undefined') {
-    logger.warn('Native WebSocket is not supported in this Node environment.');
-    return;
-  }
+  if (typeof globalThis.WebSocket === 'undefined') return;
 
   shouldReconnect = true;
 
   function connect() {
     try {
-      logger.info('Connecting NexoBot to Discord Gateway...');
       gatewayWs = new globalThis.WebSocket(GATEWAY_URL);
 
-      gatewayWs.onopen = () => {
-        logger.debug('Discord Gateway connection opened.');
-      };
+      gatewayWs.onopen = () => {};
 
       gatewayWs.onmessage = async (event) => {
         try {
           const payload = JSON.parse(event.data);
           const { op, d, s, t } = payload;
 
-          if (s !== null && s !== undefined) {
-            lastSequence = s;
-          }
+          if (s !== null && s !== undefined) lastSequence = s;
 
           if (op === 10) {
             const heartbeatInterval = d.heartbeat_interval;
@@ -114,53 +157,90 @@ export function startDiscordGateway(token) {
           if (op === 0) {
             if (t === 'READY') {
               isConnected = true;
-              const botUser = d.user;
-              logger.info(`NexoBot online ca ${botUser.username}#${botUser.discriminator || '0'}`);
-              registerSlashCommands(token, botUser.id);
+              botUserId = d.user.id;
+              logger.info(`NexoBot online ca ${d.user.username}`);
+              registerSlashCommands(token, botUserId);
             }
 
-            if (t === 'INTERACTION_CREATE') {
-              if (d.data && d.data.name === 'accounts') {
-                const channelId = d.channel_id;
-                addDynamicChannel(channelId);
-                logger.info(`Canal adaugat prin /accounts: ${channelId}`);
+            // 1. CÂND CINEVA APASĂ PE BUTON (Start sau Stop)
+            if (t === 'INTERACTION_CREATE' && d.type === 3) {
+              const customId = d.data.custom_id;
+              const channelId = d.channel_id;
 
-                try {
-                  await fetch(`${DISCORD_API_BASE}/interactions/${d.id}/${d.token}/callback`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                      type: 4,
-                      data: {
-                        content: '✅ **NexoBot activat pe acest canal!** Toate ofertele FunPay Rust vor fi trimise automat aici.'
-                      }
-                    })
-                  });
-                } catch (e) {}
+              if (customId === 'start_offers') {
+                addDynamicChannel(channelId);
+                logger.info(`Canal activat prin buton: ${channelId}`);
+
+                await fetch(`${DISCORD_API_BASE}/interactions/${d.id}/${d.token}/callback`, {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({
+                    type: 4,
+                    data: {
+                      content: '✅ **NexoBot a fost activat!** Toate ofertele FunPay Rust vor fi trimise automat pe acest canal.'
+                    }
+                  })
+                });
+              } else if (customId === 'stop_offers') {
+                removeDynamicChannel(channelId);
+                logger.info(`Canal oprit prin buton: ${channelId}`);
+
+                await fetch(`${DISCORD_API_BASE}/interactions/${d.id}/${d.token}/callback`, {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({
+                    type: 4,
+                    data: {
+                      content: '⏹️ **Ofertele FunPay Rust au fost oprite pentru acest canal.**'
+                    }
+                  })
+                });
+              }
+            }
+
+            // 2. COMENZI SLASH (/start sau /accounts)
+            if (t === 'INTERACTION_CREATE' && d.type === 2) {
+              const cmdName = d.data.name;
+              const channelId = d.channel_id;
+
+              if (cmdName === 'accounts' || cmdName === 'start') {
+                addDynamicChannel(channelId);
+                await fetch(`${DISCORD_API_BASE}/interactions/${d.id}/${d.token}/callback`, {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({
+                    type: 4,
+                    data: {
+                      content: '✅ **NexoBot a fost activat!** Ofertele FunPay Rust vor fi trimise aici.'
+                    }
+                  })
+                });
+              }
+            }
+
+            // 3. CÂND CINEVA DĂ TAG LA BOT (@NexoBot) SAU SCRIE !start
+            if (t === 'MESSAGE_CREATE') {
+              const channelId = d.channel_id;
+              const isMentioned = botUserId && d.mentions && d.mentions.some(m => m.id === botUserId);
+              const content = (d.content || '').trim().toLowerCase();
+
+              if (isMentioned || content === '!start' || content === '!accounts') {
+                await sendControlPanel(token, channelId);
               }
             }
           }
 
-          if (op === 7) {
-            gatewayWs.close(4000);
-          }
-
-          if (op === 9) {
-            setTimeout(() => sendIdentify(token), 2000);
-          }
+          if (op === 7) gatewayWs.close(4000);
+          if (op === 9) setTimeout(() => sendIdentify(token), 2000);
         } catch (err) {}
       };
 
       gatewayWs.onclose = () => {
         isConnected = false;
         if (heartbeatTimer) clearInterval(heartbeatTimer);
-        if (shouldReconnect) {
-          setTimeout(connect, 5000);
-        }
+        if (shouldReconnect) setTimeout(connect, 5000);
       };
-    } catch (err) {
-      logger.error('Failed to initialize Discord Gateway:', err.message);
-    }
+    } catch (err) {}
   }
 
   function sendHeartbeat() {
