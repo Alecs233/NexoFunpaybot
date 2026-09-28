@@ -1,69 +1,41 @@
-import { config, maskWebhookUrl } from './config.js';
+import { config } from './config.js';
 import { logger } from './logger.js';
 import { truncate, sleep } from './utils.js';
-import { sendChannelMessage } from './discord-bot.js';
+import { sendChannelMessage, getDynamicChannels } from './discord-bot.js';
 
 const COLOR_RUST_ORANGE = 0xCE422B;
 const COLOR_STARTUP_GREEN = 0x57F287;
 const BOT_NAME = 'NexoBot';
 
 /**
- * Pune aici ID-urile canalelor unde vrei să ajungă ofertele.
- * (Poți adăuga oricâte canale vrei, separate prin virgulă).
- */
-const EXTRA_CHANNELS = [
-  // Lipește ID-ul canalului de pe al doilea server între ghilimele:
-  'PUNE_AICI_ID_CANAL_SECUNDAR'
-];
-
-/**
- * Sends a raw payload to the Discord Webhook URL with rate-limit and retry handling.
+ * Sends a raw payload to a Discord Webhook URL.
  */
 export async function sendWebhookPayload(webhookUrl, payload, attempt = 1) {
   if (!webhookUrl || typeof webhookUrl !== 'string' || !webhookUrl.startsWith('http')) {
     return false;
   }
 
-  const maxAttempts = 3;
-
   try {
     const response = await fetch(webhookUrl, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload)
     });
 
     if (response.status === 429) {
-      const retryAfterHeader = response.headers.get('retry-after');
-      const retryAfterSec = retryAfterHeader ? parseFloat(retryAfterHeader) : 2;
-      const waitMs = Math.ceil(retryAfterSec * 1000) + 200;
-
-      logger.warn(`Discord rate limit (HTTP 429). Retrying after ${waitMs}ms...`);
-      await sleep(waitMs);
-
-      if (attempt < maxAttempts) {
-        return await sendWebhookPayload(webhookUrl, payload, attempt + 1);
-      }
+      await sleep(2000);
+      if (attempt < 3) return await sendWebhookPayload(webhookUrl, payload, attempt + 1);
       return false;
     }
 
-    if (!response.ok) {
-      const errText = await response.text();
-      logger.error(`Discord webhook error ${response.status}: ${errText}`);
-      return false;
-    }
-
-    return true;
+    return response.ok;
   } catch (error) {
-    logger.error('Error sending Discord webhook:', error.message);
     return false;
   }
 }
 
 /**
- * Builds the standard Discord embed and payload for a FunPay offer (fără alerte speciale DLC).
+ * Builds the standard Discord embed for a FunPay offer (fără alerte DLC).
  */
 export function buildOfferPayload(offer) {
   const rawTitle = offer.title || 'Rust Account';
@@ -110,34 +82,35 @@ export function buildOfferPayload(offer) {
 }
 
 /**
- * Dispatches a notification to ALL configured Discord channels and webhooks.
+ * Dispatches a notification to ALL channels registered dynamically or via config.
  */
 export async function dispatchDiscordNotification(payload) {
   let sentAny = false;
 
-  // Unim canalul principal din config cu canalele secundare
+  // Preia canalul din config + toate canalele activate prin /accounts
+  const dynamic = typeof getDynamicChannels === 'function' ? getDynamicChannels() : [];
   const allChannels = [
     config.discordChannelId,
-    ...EXTRA_CHANNELS
+    ...dynamic
   ]
     .flatMap(id => (id ? String(id).split(',') : []))
     .map(id => id.trim())
-    .filter(id => id && id !== 'PUNE_AICI_ID_CANAL_SECUNDAR');
+    .filter(Boolean);
 
-  // Trimitem pe fiecare canal prin Bot Token
-  if (config.discordBotToken && allChannels.length > 0) {
-    for (const channelId of allChannels) {
+  const uniqueChannels = [...new Set(allChannels)];
+
+  // Trimite pe toate canalele
+  if (config.discordBotToken && uniqueChannels.length > 0) {
+    for (const channelId of uniqueChannels) {
       try {
         const ok = await sendChannelMessage(config.discordBotToken, channelId, payload);
         if (ok) sentAny = true;
-      } catch (err) {
-        logger.error(`Eroare la trimitere pe canalul ${channelId}:`, err.message);
-      }
-      await sleep(250); // Mică pauză între canale ca să respectăm rate limit-ul
+      } catch (err) {}
+      await sleep(250);
     }
   }
 
-  // Trimitem și pe Webhook dacă este configurat
+  // Trimite și pe webhook dacă există
   if (config.discordWebhookUrl) {
     const webhooks = config.discordWebhookUrl.split(',').map(u => u.trim()).filter(Boolean);
     for (const webhook of webhooks) {
@@ -150,17 +123,11 @@ export async function dispatchDiscordNotification(payload) {
   return sentAny;
 }
 
-/**
- * Sends a notification for a newly detected offer.
- */
 export async function sendOfferNotification(offer) {
   const payload = buildOfferPayload(offer);
   return await dispatchDiscordNotification(payload);
 }
 
-/**
- * Sends the bot startup message to Discord.
- */
 export async function sendStartupNotification(stats = { total: 0, kept: 0 }) {
   const embed = {
     title: '🚀 NexoBot Started',
