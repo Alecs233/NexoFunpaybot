@@ -48,9 +48,6 @@ let shouldReconnect = true;
 const DISCORD_API_BASE = 'https://discord.com/api/v10';
 const GATEWAY_URL = 'wss://gateway.discord.gg/?v=10&encoding=json';
 
-/**
- * Register slash command /accounts with Discord API
- */
 async function registerSlashCommands(token, applicationId) {
   try {
     const authHeader = token.startsWith('Bot ') ? token : `Bot ${token}`;
@@ -75,9 +72,6 @@ async function registerSlashCommands(token, applicationId) {
   }
 }
 
-/**
- * Connects to Discord Gateway WebSocket
- */
 export function startDiscordGateway(token) {
   if (!token) return;
   if (typeof globalThis.WebSocket === 'undefined') {
@@ -105,7 +99,6 @@ export function startDiscordGateway(token) {
             lastSequence = s;
           }
 
-          // Opcode 10: HELLO
           if (op === 10) {
             const heartbeatInterval = d.heartbeat_interval;
             if (heartbeatTimer) clearInterval(heartbeatTimer);
@@ -118,16 +111,14 @@ export function startDiscordGateway(token) {
             sendIdentify(token);
           }
 
-          // Opcode 0: Dispatch Events
           if (op === 0) {
             if (t === 'READY') {
               isConnected = true;
               const botUser = d.user;
-              logger.info(`🤖 NexoBot online ca ${botUser.username}#${botUser.discriminator || '0'}`);
+              logger.info(`NexoBot online ca ${botUser.username}#${botUser.discriminator || '0'}`);
               registerSlashCommands(token, botUser.id);
             }
 
-            // Slash command /accounts
             if (t === 'INTERACTION_CREATE') {
               if (d.data && d.data.name === 'accounts') {
                 const channelId = d.channel_id;
@@ -184,7 +175,7 @@ export function startDiscordGateway(token) {
         op: 2,
         d: {
           token: botToken.startsWith('Bot ') ? botToken.slice(4) : botToken,
-          intents: 513, // GUILDS (1) + GUILD_MESSAGES (512) - FĂRĂ permisiuni blocate de Discord!
+          intents: 513,
           properties: { os: 'linux', browser: 'NexoBot', device: 'NexoBot' },
           presence: {
             activities: [{ name: 'FunPay Rust Offers', type: 3 }],
@@ -199,6 +190,36 @@ export function startDiscordGateway(token) {
   connect();
 }
 
-/**
- * Sends a message to a Discord channel
- */
+export async function sendChannelMessage(token, channelId, payload, attempt = 1) {
+  if (!token || !channelId) return false;
+
+  const authHeader = token.startsWith('Bot ') ? token : `Bot ${token}`;
+  const url = `${DISCORD_API_BASE}/channels/${channelId}/messages`;
+
+  try {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Authorization': authHeader,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(payload)
+    });
+
+    if (response.status === 429) {
+      await sleep(2000);
+      if (attempt < 3) return await sendChannelMessage(token, channelId, payload, attempt + 1);
+      return false;
+    }
+
+    return response.ok;
+  } catch (err) {
+    return false;
+  }
+}
+
+export function stopDiscordGateway() {
+  shouldReconnect = false;
+  if (heartbeatTimer) clearInterval(heartbeatTimer);
+  if (gatewayWs) gatewayWs.close(1000, 'Shutting down');
+}
